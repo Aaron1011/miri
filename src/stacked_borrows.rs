@@ -538,7 +538,7 @@ trait EvalContextPrivExt<'a, 'mir, 'tcx: 'a+'mir>: crate::MiriEvalContextExt<'a,
     ) -> EvalResult<'tcx> {
         let this = self.eval_context_mut();
         let ptr = place.ptr.to_ptr()?;
-        let barrier = if fn_barrier { Some(this.frame().extra) } else { None };
+        let barrier = if fn_barrier { Some(this.frame().extra.call_id) } else { None };
         trace!("reborrow: creating new reference for {:?} (pointee {}): {:?}",
             ptr, place.layout.ty, new_bor);
 

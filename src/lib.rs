@@ -372,10 +372,15 @@ impl<'a, 'mir, 'tcx> MiriEvalContextExt<'a, 'mir, 'tcx> for MiriEvalContext<'a, 
     }
 }
 
+pub struct FrameData {
+    pub call_id: stacked_borrows::CallId,
+    pub catch_panic: Option<()>
+}
+
 impl<'a, 'mir, 'tcx> Machine<'a, 'mir, 'tcx> for Evaluator<'tcx> {
     type MemoryKinds = MiriMemoryKind;
 
-    type FrameExtra = stacked_borrows::CallId;
+    type FrameExtra = FrameData;
     type MemoryExtra = stacked_borrows::MemoryState;
     type AllocExtra = stacked_borrows::Stacks;
     type PointerTag = Borrow;
@@ -575,15 +580,18 @@ impl<'a, 'mir, 'tcx> Machine<'a, 'mir, 'tcx> for Evaluator<'tcx> {
     #[inline(always)]
     fn stack_push(
         ecx: &mut InterpretCx<'a, 'mir, 'tcx, Self>,
-    ) -> EvalResult<'tcx, stacked_borrows::CallId> {
-        Ok(ecx.memory().extra.borrow_mut().new_call())
+    ) -> EvalResult<'tcx, FrameData> {
+        Ok(FrameData {
+            call_id: ecx.memory().extra.borrow_mut().new_call(),
+            catch_panic: None
+        })
     }
 
     #[inline(always)]
     fn stack_pop(
         ecx: &mut InterpretCx<'a, 'mir, 'tcx, Self>,
-        extra: stacked_borrows::CallId,
+        extra: FrameData,
     ) -> EvalResult<'tcx> {
-        Ok(ecx.memory().extra.borrow_mut().end_call(extra))
+        Ok(ecx.memory().extra.borrow_mut().end_call(extra.call_id))
     }
 }
