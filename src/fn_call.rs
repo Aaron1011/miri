@@ -1,6 +1,7 @@
 use rustc::ty;
 use rustc::ty::layout::{Align, LayoutOf, Size};
 use rustc::ty::{ExistentialPredicate, ExistentialTraitRef, RegionKind, List};
+use rustc_target::spec::PanicStrategy;
 use rustc::hir::def_id::DefId;
 use rustc::mir;
 use syntax::attr;
@@ -135,7 +136,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
 
                 let payload_dyn = this.read_immediate(mplace.into())?;
 
-                if this.machine.panic_abort {
+                if this.tcx.tcx.sess.panic_strategy() == PanicStrategy::Abort  {
                     return err!(MachineError("the evaluated program abort-panicked".to_string()));
                 }
 
@@ -532,7 +533,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
 
 
 
-                if !this.machine.panic_abort {
+                if this.tcx.tcx.sess.panic_strategy() == PanicStrategy::Unwind {
                     this.frame_mut().extra.catch_panic = Some(UnwindData {
                         data: data.to_ptr()?,
                         data_ptr,

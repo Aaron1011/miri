@@ -66,7 +66,6 @@ pub struct MiriConfig {
 
     // The seed to use when non-determinism is required (e.g. getrandom())
     pub seed: Option<u64>,
-    pub panic_abort: bool
 }
 
 // Used by priroda.
@@ -78,7 +77,7 @@ pub fn create_ecx<'a, 'mir: 'a, 'tcx: 'mir>(
     let mut ecx = InterpretCx::new(
         tcx.at(syntax::source_map::DUMMY_SP),
         ty::ParamEnv::reveal_all(),
-        Evaluator::new(config.validate, config.seed, config.panic_abort),
+        Evaluator::new(config.validate, config.seed),
     );
 
     let main_instance = ty::Instance::mono(ecx.tcx.tcx, main_id);
@@ -336,15 +335,14 @@ pub struct Evaluator<'tcx> {
     /// The random number generator to use if Miri
     /// is running in non-deterministic mode
     pub(crate) rng: Option<StdRng>,
+}
 
-    /// Whether or not to abort on panic
-    /// If this is 'false', Miri will perform
-    /// stack unwinding when a panic occurs
-    pub(crate) panic_abort: bool
+/// How to handle panics. 
+pub enum PanicMode {
 }
 
 impl<'tcx> Evaluator<'tcx> {
-    fn new(validate: bool, seed: Option<u64>, panic_abort: bool) -> Self {
+    fn new(validate: bool, seed: Option<u64>) -> Self {
         Evaluator {
             env_vars: HashMap::default(),
             argc: None,
@@ -355,7 +353,6 @@ impl<'tcx> Evaluator<'tcx> {
             validate,
             stacked_borrows: stacked_borrows::State::default(),
             rng: seed.map(|s| StdRng::seed_from_u64(s)),
-            panic_abort
         }
     }
 }
