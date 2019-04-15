@@ -21,7 +21,10 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
         trace!("eval_fn_call: {:#?}, {:?}", instance, dest.map(|place| *place));
 
         // First, run the common hooks also supported by CTFE.
-        if this.hook_fn(instance, args, dest)? {
+        if Some(instance.def_id()) != this.tcx.lang_items().panic_fn() && 
+            Some(instance.def_id()) != this.tcx.lang_items().begin_panic_fn() &&
+            this.hook_fn(instance, args, dest)? {
+
             this.goto_block(ret)?;
             return Ok(None);
         }
@@ -71,8 +74,170 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
 
         // First: functions that could diverge.
         match link_name {
-            "__rust_start_panic" | "panic_impl" => {
-                return err!(MachineError("the evaluated program panicked".to_string()));
+            "__rust_start_panic" => {
+                // This function has the signature:
+                // 'fn __rust_start_panic(payload: usize) -> u32;'
+                //
+                // 'payload' is constructed as follows:
+                // 1. We start with a type implementing core::panic::BoxMeUp
+                // 2. We make this type into a trait object, obtaining a '&mut dyn BoxMeUp'
+                // 3. We obtain a raw pointer to the above mutable reference: that is, we make:
+                //    '*mut &mut dyn BoxMeUp'
+                // 4. We convert the raw pointer to a 'usize'
+                //
+
+                // When a panic occurs, we (carefully!) reverse the above steps
+                // to get back to the actual panic payload
+               
+                // Even though our argument 'usize', Miri will have kept track
+                // of the fact that it was created via a cast from a pointer.
+                // Thus, 'deref_operand' will go directly from a 'usize'
+                // to a '&mut dyn BoxMeUp' - the intermediate cast
+                // from 'usize' to '*mut &dyn BoxMeUp' is done implicitly
+                //
+                // Reference:
+                // https://github.com/rust-lang/rust/blob/9ebf47851a357faa4cd97f4b1dc7835f6376e639/src/libpanic_unwind/lib.rs#L101
+                // https://github.com/rust-lang/rust/blob/9ebf47851a357faa4cd97f4b1dc7835f6376e639/src/libpanic_unwind/lib.rs#L81
+                //
+                // payload_raw now represents our '&mut dyn BoxMeUp' - a fat pointer
+                //
+                // Note that we intentially call deref_operand before checking
+                // This ensures that we always check the validity of the argument,
+                // even if we don't end up using it
+                let payload_raw = this.read_immediate(args[0])?;
+                let payload_dyn = this.read_immediate(payload_raw.into())?;
+
+                if this.machine.panic_abort {
+                    return err!(MachineError("the evaluated program abort-panicked".to_string()));
+                }
+
+                // This part is tricky - we need to call BoxMeUp::box_me_up
+                // on the vtable.
+                //
+                // core::panic::BoxMeUp is declared as follows:
+                //
+                // pub unsafe trait BoxMeUp {
+                //     fn box_me_up(&mut self) -> *mut (dyn Any + Send);
+                //     fn get(&mut self) -> &(dyn Any + Send);
+                // }
+                //
+                // box_me_up is the first method in the vtable.
+                // First, we extract the vtable pointer from our fat pointer,
+                // and check its alignment
+                println!("Payload dyn: {:?}", payload_dyn);
+                let vtable_scalar = payload_dyn.to_meta()?.expect("Expected fat pointer!"); 
+                let vtable_ptr = vtable_scalar.to_ptr()?;
+                this.memory().check_align(vtable_ptr.into(), this.tcx.data_layout.pointer_align.abi)?;
+
+                // Now, we derefernce the vtable pointer.
+                let alloc = this.memory().get(vtable_ptr.alloc_id)?;
+
+                // Finally, we extract the pointer to 'box_me_up'.
+                // The vtable is layed out in memory like this:
+                //
+                //```
+                // <drop_ptr> (usize)
+                // <size> (usize)
+                // <align> (usize)
+                // <method_ptr_1> (usize)
+                // <method_ptr_2> (usize)
+                // ...
+                // <method_ptr_n> (usize)
+                //```
+                //
+                // Since box_me_up is the first method pointer
+                // in the vtable, we use an offset of 3 pointer sizes
+                // (skipping over <drop_ptr>, <size>, and <align>)
+
+                let box_me_up_ptr = alloc.read_ptr_sized(
+                    this,
+                    vtable_ptr.offset(this.pointer_size() * 3, this)?
+                )?.to_ptr()?;
+
+                // Get the actual function instance
+                let box_me_up_fn = this.memory().get_fn(box_me_up_ptr)?;
+                let box_me_up_mir = this.load_mir(box_me_up_fn.def)?;
+
+                // Extract the signature
+                // We know that there are no HRBTs here, so it's fine to use
+                // skip_binder
+                let fn_sig_temp = box_me_up_fn.ty(*this.tcx).fn_sig(*this.tcx);
+                let fn_sig = fn_sig_temp.skip_binder();
+                //let fn_sig = this.tcx.normalize_erasing_late_bound_regions(this.param_env, &fn_sig);
+
+                // Finally, we can actually call 'box_me_up'
+
+                let ty = fn_sig.inputs()[0].builtin_deref(true).unwrap().ty;
+
+                let arg = ImmTy::from_scalar(payload_dyn.to_scalar_ptr()?, this.layout_of(ty)?);
+
+                let dyn_ptr_layout = this.layout_of(fn_sig.output())?;
+
+                // We allocate space to store the return value of box_me_up:
+                // '*mut (dyn Any + Send)', which is a fat 
+                let temp_ptr = this.allocate(dyn_ptr_layout, MiriMemoryKind::UnwindHelper.into());
+
+                let cur_frame = this.cur_frame();
+
+                this.push_stack_frame(
+                    box_me_up_fn,
+                    box_me_up_mir.span,
+                    box_me_up_mir,
+                    Some(temp_ptr.into()),
+                    StackPopCleanup::None { cleanup: true }
+                )?;
+
+                // Step through execution of 'box_me_up'
+                // We know that we're finished when our stack depth
+                // returns to where it was before.
+                //
+                // Note that everything will get completely screwed up
+                // if 'box_me_up' panics. This is fine, since this
+                // function should never panic, as it's part of the core
+                // panic handling infrastructure
+                while this.cur_frame() != cur_frame {
+                    this.step()?;
+                }
+
+                // 'box_me_up' has finished. 'temp_ptr' now holds
+                // a '*mut (dyn Any + Send)'
+                // We want to split this into its consituient parts -
+                // the data and vtable pointers - and store them back
+                // into the panic handler frame
+               
+
+                let real_ret = temp_ptr.to_ref();
+                let real_ret_data = real_ret.to_scalar_ptr()?;
+                let real_ret_vtable = real_ret.to_meta()?.expect("Expected fat pointer");
+
+                // We're in panic unwind mode. We pop off stack
+                // frames until one of two things happens: we reach
+                // a frame with 'catch_panic' set, or we pop of all frames
+                //
+                // If we pop off all frames without encountering 'catch_panic',
+                // we exut.
+                //
+                // If we encounter 'catch_panic', we continue execution at that
+                // frame, filling in data from the panic
+                //
+
+                while !this.stack().is_empty() {
+                    println!("Inspecting frame: {:?}", this.frame().span);
+                    if let Some(unwind_data) = this.frame().extra.catch_panic.as_ref() {
+                        println!("Target frame found - stopping unwind!");
+                        // Here we go
+
+                        let data_ptr = unwind_data.data_ptr.clone();
+                        let vtable_ptr = unwind_data.vtable_ptr.clone();
+                        drop(unwind_data);
+
+                        this.write_scalar(real_ret_data, data_ptr.into())?;
+                        this.write_scalar(real_ret_vtable, vtable_ptr.into())?;
+                        break;
+                    } else {
+                        //this.pop_stack_frame()?;
+                    }
+                }
             }
             _ => if dest.is_none() {
                 return err!(Unimplemented(
@@ -277,6 +442,8 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // We abort on panic, so not much is going on here, but we still have to call the closure.
                 let f = this.read_scalar(args[0])?.to_ptr()?;
                 let data = this.read_scalar(args[1])?.not_undef()?;
+                let data_ptr = this.deref_operand(args[2])?;
+                let vtable_ptr = this.deref_operand(args[3])?;
                 let f_instance = this.memory().get_fn(f)?;
                 this.write_null(dest)?;
                 trace!("__rust_maybe_catch_panic: {:?}", f_instance);
@@ -294,6 +461,15 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                     // Directly return to caller.
                     StackPopCleanup::Goto(Some(ret)),
                 )?;
+
+                if !this.machine.panic_abort {
+                    this.frame_mut().extra.catch_panic = Some(UnwindData {
+                        data: data.to_ptr()?,
+                        data_ptr,
+                        vtable_ptr
+                    })
+                }
+
                 let mut args = this.frame().mir.args_iter();
 
                 let arg_local = args.next().ok_or_else(||

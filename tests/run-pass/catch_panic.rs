@@ -6,7 +6,7 @@ fn do_panic() {
 
 fn main() {
     let res = catch_unwind(do_panic);
-    let expected: Box<&str> = Box::new("Hello from panic!");
+    let expected: Box<&str> = Box::new("Hello from panic!a");
     let actual = res.expect_err("do_panic() did not panic!")
         .downcast::<&'static str>().expect("Failed to cast to string!");
         
