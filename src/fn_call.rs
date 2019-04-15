@@ -173,10 +173,10 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // First, we extract the vtable pointer from our fat pointer,
                 // and check its alignment
                 //println!("Payload raw: {:?}", payload_raw);
-                println!("Payload dyn: {:?}", payload_dyn);
+                //println!("Payload dyn: {:?}", payload_dyn);
 
-                let vtable_scalar = payload_dyn.to_meta()?.expect("Expected fat pointer!"); 
-                let vtable_ptr = vtable_scalar.to_ptr()?;
+                let vtable_ptr = payload_dyn.to_meta()?.expect("Expected fat pointer!").to_ptr()?; 
+                let data_ptr = payload_dyn.to_scalar_ptr()?;
                 this.memory().check_align(vtable_ptr.into(), this.tcx.data_layout.pointer_align.abi)?;
 
                 // Now, we derefernce the vtable pointer.
@@ -222,6 +222,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 let arg = ImmTy::from_scalar(payload_dyn.to_scalar_ptr()?, this.layout_of(ty)?);
 
                 let dyn_ptr_layout = this.layout_of(fn_sig.output())?;
+                println!("Dyn layout: {:?}", dyn_ptr_layout);
 
                 // We allocate space to store the return value of box_me_up:
                 // '*mut (dyn Any + Send)', which is a fat 
@@ -236,6 +237,10 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                     Some(temp_ptr.into()),
                     StackPopCleanup::None { cleanup: true }
                 )?;
+
+                let mut args = this.frame().mir.args_iter();
+                let arg_0 = this.eval_place(&mir::Place::Base(mir::PlaceBase::Local(args.next().unwrap())))?;
+                this.write_scalar(data_ptr, arg_0)?;
 
                 // Step through execution of 'box_me_up'
                 // We know that we're finished when our stack depth
@@ -254,9 +259,9 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // We want to split this into its consituient parts -
                 // the data and vtable pointers - and store them back
                 // into the panic handler frame
-               
 
-                let real_ret = temp_ptr.to_ref();
+                let real_ret = this.read_immediate(temp_ptr.into())?;
+                println!("Real ret: {:?}", real_ret);
                 let real_ret_data = real_ret.to_scalar_ptr()?;
                 let real_ret_vtable = real_ret.to_meta()?.expect("Expected fat pointer");
 
