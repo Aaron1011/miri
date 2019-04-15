@@ -5,6 +5,9 @@ fn do_panic() {
 }
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        println!("Custom panic hook: location: {:?}", info.location());
+    }));
     let res = catch_unwind(do_panic);
     let expected: Box<&str> = Box::new("Hello from panic!a");
     let actual = res.expect_err("do_panic() did not panic!")

@@ -1,6 +1,6 @@
 use rustc::ty;
 use rustc::ty::layout::{Align, LayoutOf, Size};
-use rustc::ty::RegionKind;
+use rustc::ty::{ExistentialPredicate, ExistentialTraitRef, RegionKind, List};
 use rustc::hir::def_id::DefId;
 use rustc::mir;
 use syntax::attr;
@@ -110,9 +110,27 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 let rust_panic_fn = this.tcx.tcx
                     .type_of(this.resolve_did(&["std", "panicking", "rust_panic"])?);
 
+                let box_me_up_did = this.resolve_did(&["core", "panic", "BoxMeUp"])?;
+
+
+                let mut traits = &[ExistentialPredicate::Trait(ExistentialTraitRef {
+                    def_id: box_me_up_did,
+                    substs: List::empty()
+                })];
+
+                let me_mut_dyn = this.tcx.tcx.mk_dynamic(
+                    ty::Binder::dummy(this.tcx.tcx.intern_existential_predicates(traits)),
+                    &RegionKind::ReErased
+                );
+
+                let me_mut_ref = this.tcx.tcx.mk_mut_ref(&RegionKind::ReErased, me_mut_dyn);
+
+                let me_mut_raw = this.tcx.tcx.mk_mut_ptr(me_mut_ref);
+
+
                 // We don't care about HRTBs here, so skip the binder
-                let me_mut_ref = rust_panic_fn.fn_sig(this.tcx.tcx).input(0);
-                let me_mut_raw = this.tcx.tcx.mk_mut_ptr(me_mut_ref.skip_binder());
+                //let me_mut_ref = rust_panic_fn.fn_sig(this.tcx.tcx).input(0);
+                //let me_mut_raw = this.tcx.tcx.mk_mut_ptr(me_mut_ref.skip_binder());
 
 
                 println!("*mut &mut BoxMeUp: {:?}", me_mut_raw);
@@ -251,8 +269,11 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // function should never panic, as it's part of the core
                 // panic handling infrastructure
                 while this.cur_frame() != cur_frame {
+                    println!("Stepping: {:?}", this.frame().span);
                     this.step()?;
                 }
+
+                println!("Returning into: {:?}", this.frame().span);
 
                 // 'box_me_up' has finished. 'temp_ptr' now holds
                 // a '*mut (dyn Any + Send)'
@@ -290,9 +311,22 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                         this.write_scalar(real_ret_vtable, vtable_ptr.into())?;
                         break;
                     } else {
-                        //this.pop_stack_frame()?;
+                        println!("Popping stack frame!");
+                        // HACK: set the return place to prevent librustc_mir
+                        // from bailing out. This should be replaced with a proper
+                        // solution (e.g. giving 'pop_stack_frame' an 'unwinding' argument)
+                        this.frame_mut().return_place = Some(
+                            MPlaceTy::dangling(this.layout_of(this.tcx.mk_unit())?, this).into()
+                        );
+                        this.frame_mut().return_to_block = StackPopCleanup::None { cleanup: true };
+                        this.pop_stack_frame()?;
                     }
                 }
+
+                this.goto_block(Some(ret.expect("ret is None!")))?;
+                this.dump_place(*dest.expect("dest is None!"));
+                return Ok(())
+
             }
             _ => if dest.is_none() {
                 return err!(Unimplemented(
@@ -503,6 +537,17 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 this.write_null(dest)?;
                 trace!("__rust_maybe_catch_panic: {:?}", f_instance);
 
+
+                if !this.machine.panic_abort {
+                    println!("Panic data for frame: {:?}", this.frame().span);
+                    this.frame_mut().extra.catch_panic = Some(UnwindData {
+                        data: data.to_ptr()?,
+                        data_ptr,
+                        vtable_ptr
+                    })
+                }
+
+
                 // Now we make a function call.
                 // TODO: consider making this reusable? `InterpretCx::step` does something similar
                 // for the TLS destructors, and of course `eval_main`.
@@ -516,14 +561,6 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                     // Directly return to caller.
                     StackPopCleanup::Goto(Some(ret)),
                 )?;
-
-                if !this.machine.panic_abort {
-                    this.frame_mut().extra.catch_panic = Some(UnwindData {
-                        data: data.to_ptr()?,
-                        data_ptr,
-                        vtable_ptr
-                    })
-                }
 
                 let mut args = this.frame().mir.args_iter();
 
