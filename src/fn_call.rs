@@ -107,6 +107,8 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // even if we don't end up using it
                 //let payload_raw = this.read_scalar(args[0])?;
                
+                println!("Panic at: {:?}", this.frame().span);
+
                 let rust_panic_fn = this.tcx.tcx
                     .type_of(this.resolve_did(&["std", "panicking", "rust_panic"])?);
 
@@ -269,7 +271,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // function should never panic, as it's part of the core
                 // panic handling infrastructure
                 while this.cur_frame() != cur_frame {
-                    println!("Stepping: {:?}", this.frame().span);
+                    //println!("Stepping: {:?}", this.frame().span);
                     this.step()?;
                 }
 
@@ -299,7 +301,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
 
                 while !this.stack().is_empty() {
                     println!("Inspecting frame: {:?}", this.frame().span);
-                    if let Some(unwind_data) = this.frame().extra.catch_panic.as_ref() {
+                    if let Some(unwind_data) = this.frame_mut().extra.catch_panic.take() {
                         println!("Target frame found - stopping unwind!");
                         // Here we go
 
