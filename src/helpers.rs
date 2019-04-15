@@ -9,7 +9,7 @@ impl<'a, 'mir, 'tcx> EvalContextExt<'a, 'mir, 'tcx> for crate::MiriEvalContext<'
 
 pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'a, 'mir, 'tcx> {
     /// Gets an instance for a path.
-    fn resolve_path(&self, path: &[&str]) -> EvalResult<'tcx, ty::Instance<'tcx>> {
+    fn resolve_did(&self, path: &[&str]) -> EvalResult<'tcx, DefId> {
         let this = self.eval_context_ref();
         this.tcx
             .crates()
@@ -27,7 +27,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                     for item in mem::replace(&mut items, Default::default()).iter() {
                         if item.ident.name == *segment {
                             if path_it.peek().is_none() {
-                                return Some(ty::Instance::mono(this.tcx.tcx, item.def.def_id()));
+                                return Some(item.def.def_id());
                             }
 
                             items = this.tcx.item_children(item.def.def_id());
@@ -42,6 +42,11 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 InterpError::PathNotFound(path).into()
             })
     }
+
+    fn resolve_path(&self, path: &[&str]) -> EvalResult<'tcx, ty::Instance<'tcx>> {
+        Ok(ty::Instance::mono(self.eval_context_ref().tcx.tcx, self.resolve_did(path)?))
+    }
+
 
     /// Visits the memory covered by `place`, sensitive to freezing: the 3rd parameter
     /// will be true if this is frozen, false if this is in an `UnsafeCell`.

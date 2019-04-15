@@ -1,5 +1,6 @@
 use rustc::ty;
 use rustc::ty::layout::{Align, LayoutOf, Size};
+use rustc::ty::RegionKind;
 use rustc::hir::def_id::DefId;
 use rustc::mir;
 use syntax::attr;
@@ -104,8 +105,55 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // Note that we intentially call deref_operand before checking
                 // This ensures that we always check the validity of the argument,
                 // even if we don't end up using it
-                let payload_raw = this.read_immediate(args[0])?;
-                let payload_dyn = this.read_immediate(payload_raw.into())?;
+                //let payload_raw = this.read_scalar(args[0])?;
+               
+                let rust_panic_fn = this.tcx.tcx
+                    .type_of(this.resolve_did(&["std", "panicking", "rust_panic"])?);
+
+                // We don't care about HRTBs here, so skip the binder
+                let me_mut_ref = rust_panic_fn.fn_sig(this.tcx.tcx).input(0);
+                let me_mut_raw = this.tcx.tcx.mk_mut_ptr(me_mut_ref.skip_binder());
+
+
+                println!("*mut &mut BoxMeUp: {:?}", me_mut_raw);
+
+
+                //let me_did = this.resolve_did(&["core", "panic", "BoxMeUp"])?;
+                //let me_ty = this.tcx.tcx.type_of(me_did);
+
+                // Make '&mut dyn 
+                //let me_mut_ref = this.tcx.tcx.mk_mut_ref(&RegionKind::ReErased, me_ty);
+
+                /*for assoc in this.tcx.tcx.associated_items(me_did) {
+                    if tcx.item_name(assoc.def_id) == "box_me_up" {
+                        println!("Found box_me_up !");
+                    }
+                    println!("Associated: {:?}", assoc);
+                }
+                println!("Ty: {:?}", me_did);*/
+
+                let payload_raw = this.read_scalar(args[0])?.not_undef()?;
+                /*let payload_dyn = this.memory().get(payload_raw.alloc_id)?
+                    .read_ptr_sized(this, payload_raw)?
+                    .not_undef()?;*/
+
+                println!("Payload raw: {:?}", payload_raw);
+                //println!("Payload dyn: {:?}", payload_dyn);
+
+                let dyn_layout = this.layout_of(me_mut_raw)?;
+
+                let imm_ty = ImmTy::from_scalar(payload_raw, dyn_layout);
+                let mplace = this.ref_to_mplace(imm_ty)?;
+
+                /*let mem_place = MemPlace::from_ptr(payload_dyn,
+                  4                                 this.layout_of(me_mut_ref.skip_binder())?.align.abi);*/
+
+                //let payload_dyn: Immediate = panic!();
+                //let payload_dyn = this.read_immediate(payload_dyn)?;
+                let payload_dyn = this.read_immediate(mplace.into())?;
+                println!("Payloa dyn 2: {:?}", payload_dyn);
+
+                //let payload_dyn = this.ref_to_mplace(payload_raw).as_ref().expect("Can't as_ref");
 
                 if this.machine.panic_abort {
                     return err!(MachineError("the evaluated program abort-panicked".to_string()));
@@ -124,7 +172,9 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // box_me_up is the first method in the vtable.
                 // First, we extract the vtable pointer from our fat pointer,
                 // and check its alignment
+                //println!("Payload raw: {:?}", payload_raw);
                 println!("Payload dyn: {:?}", payload_dyn);
+
                 let vtable_scalar = payload_dyn.to_meta()?.expect("Expected fat pointer!"); 
                 let vtable_ptr = vtable_scalar.to_ptr()?;
                 this.memory().check_align(vtable_ptr.into(), this.tcx.data_layout.pointer_align.abi)?;
