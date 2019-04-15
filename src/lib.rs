@@ -394,6 +394,7 @@ pub struct UnwindData<'tcx> {
     pub data: Pointer<Borrow>,
     pub data_ptr: MPlaceTy<'tcx, stacked_borrows::Borrow>,
     pub vtable_ptr: MPlaceTy<'tcx, stacked_borrows::Borrow>,
+    pub dest: PlaceTy<'tcx, Borrow>
 }
 
 impl<'a, 'mir, 'tcx> Machine<'a, 'mir, 'tcx> for Evaluator<'tcx> {

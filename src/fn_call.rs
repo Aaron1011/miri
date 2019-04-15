@@ -305,10 +305,14 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
 
                         let data_ptr = unwind_data.data_ptr.clone();
                         let vtable_ptr = unwind_data.vtable_ptr.clone();
+                        let dest = unwind_data.dest.clone();
                         drop(unwind_data);
 
                         this.write_scalar(real_ret_data, data_ptr.into())?;
                         this.write_scalar(real_ret_vtable, vtable_ptr.into())?;
+
+                        this.write_scalar(Scalar::from_int(1, dest.layout.size), dest)?;
+
                         break;
                     } else {
                         println!("Popping stack frame!");
@@ -322,6 +326,8 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                         this.pop_stack_frame()?;
                     }
                 }
+
+                this.memory_mut().deallocate(temp_ptr.to_ptr()?, None, MiriMemoryKind::UnwindHelper.into())?;
 
                 this.goto_block(Some(ret.expect("ret is None!")))?;
                 this.dump_place(*dest.expect("dest is None!"));
@@ -543,7 +549,8 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                     this.frame_mut().extra.catch_panic = Some(UnwindData {
                         data: data.to_ptr()?,
                         data_ptr,
-                        vtable_ptr
+                        vtable_ptr,
+                        dest: dest.clone()
                     })
                 }
 
