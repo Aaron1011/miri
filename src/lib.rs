@@ -27,8 +27,10 @@ use std::borrow::Cow;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
+use rustc_target::spec::PanicStrategy;
+use rustc::ty::{ExistentialPredicate, ExistentialTraitRef, RegionKind, List};
 use rustc::ty::{self, TyCtxt, query::TyCtxtAt};
-use rustc::ty::layout::{LayoutOf, Size, Align};
+use rustc::ty::layout::{LayoutOf, Size, Align, TyLayout};
 use rustc::hir::{self, def_id::DefId};
 use rustc::mir;
 pub use rustc_mir::interpret::*;
@@ -204,10 +206,37 @@ pub fn create_ecx<'a, 'mir: 'a, 'tcx: 'mir>(
         }
     }
 
+    // Cache some data used by unwinding
+    if ecx.tcx.tcx.sess.panic_strategy() == PanicStrategy::Unwind {
+
+        // We build up the layout of '*mut &mut dyn core::panic::BoxMeUp'
+        let box_me_up_did = ecx.resolve_did(&["core", "panic", "BoxMeUp"])?;
+        let traits = &[ExistentialPredicate::Trait(ExistentialTraitRef {
+            def_id: box_me_up_did,
+            substs: List::empty()
+        })];
+
+        let me_mut_dyn = ecx.tcx.tcx.mk_dynamic(
+            ty::Binder::dummy(ecx.tcx.tcx.intern_existential_predicates(traits)),
+            &RegionKind::ReErased
+        );
+
+        let me_mut_ref = ecx.tcx.tcx.mk_mut_ref(&RegionKind::ReErased, me_mut_dyn);
+        let me_mut_raw = ecx.tcx.tcx.mk_mut_ptr(me_mut_ref);
+        let box_me_up_layout = ecx.layout_of(me_mut_raw)?;
+
+        ecx.machine.cached_data = Some(CachedTypes {
+            box_me_up_layout
+        });
+
+    }
+
+
     assert!(args.next().is_none(), "start lang item has more arguments than expected");
 
     Ok(ecx)
 }
+
 
 pub fn eval_main<'a, 'tcx: 'a>(
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
@@ -335,11 +364,15 @@ pub struct Evaluator<'tcx> {
     /// The random number generator to use if Miri
     /// is running in non-deterministic mode
     pub(crate) rng: Option<StdRng>,
+
+    pub(crate) cached_data: Option<CachedTypes<'tcx>>
 }
 
-/// How to handle panics. 
-pub enum PanicMode {
+pub struct CachedTypes<'tcx> {
+    // The layout of the type '*mut &mut dyn core::panic::BoxMeUp'
+    box_me_up_layout: TyLayout<'tcx>,
 }
+
 
 impl<'tcx> Evaluator<'tcx> {
     fn new(validate: bool, seed: Option<u64>) -> Self {
@@ -353,6 +386,7 @@ impl<'tcx> Evaluator<'tcx> {
             validate,
             stacked_borrows: stacked_borrows::State::default(),
             rng: seed.map(|s| StdRng::seed_from_u64(s)),
+            cached_data: None
         }
     }
 }

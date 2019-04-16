@@ -1,6 +1,5 @@
 use rustc::ty;
 use rustc::ty::layout::{Align, LayoutOf, Size};
-use rustc::ty::{ExistentialPredicate, ExistentialTraitRef, RegionKind, List};
 use rustc_target::spec::PanicStrategy;
 use rustc::hir::def_id::DefId;
 use rustc::mir;
@@ -110,28 +109,15 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                
                 trace!("__rustc_start_panic: {:?}", this.frame().span);
 
-                let box_me_up_did = this.resolve_did(&["core", "panic", "BoxMeUp"])?;
-
-
-                let traits = &[ExistentialPredicate::Trait(ExistentialTraitRef {
-                    def_id: box_me_up_did,
-                    substs: List::empty()
-                })];
-
-                let me_mut_dyn = this.tcx.tcx.mk_dynamic(
-                    ty::Binder::dummy(this.tcx.tcx.intern_existential_predicates(traits)),
-                    &RegionKind::ReErased
-                );
-
-                let me_mut_ref = this.tcx.tcx.mk_mut_ref(&RegionKind::ReErased, me_mut_dyn);
-
-                let me_mut_raw = this.tcx.tcx.mk_mut_ptr(me_mut_ref);
 
                 let payload_raw = this.read_scalar(args[0])?.not_undef()?;
                 
-                let dyn_layout = this.layout_of(me_mut_raw)?;
+                
+                let imm_ty = ImmTy::from_scalar(
+                    payload_raw,
+                    this.machine.cached_data.as_ref().unwrap().box_me_up_layout
+                );
 
-                let imm_ty = ImmTy::from_scalar(payload_raw, dyn_layout);
                 let mplace = this.ref_to_mplace(imm_ty)?;
 
                 let payload_dyn = this.read_immediate(mplace.into())?;
