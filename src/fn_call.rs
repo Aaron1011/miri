@@ -1,5 +1,6 @@
 use rustc::ty;
 use rustc::ty::layout::{Align, LayoutOf, Size};
+use rustc::ty::InstanceDef;
 use rustc_target::spec::PanicStrategy;
 use rustc::hir::def_id::DefId;
 use rustc::mir;
@@ -19,7 +20,16 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
         ret: Option<mir::BasicBlock>,
     ) -> EvalResult<'tcx, Option<&'mir mir::Mir<'tcx>>> {
         let this = self.eval_context_mut();
-        trace!("eval_fn_call: {:#?}, {:?}", instance, dest.map(|place| *place));
+        /*trace!("eval_fn_call: {:#?}, {:?} {:?}", instance, instance.def_id(), dest.map(|place| *place));
+        println!("panic_impl: {:?}", this.tcx.lang_items().panic_impl());
+        println!("Eval: {:?}", instance);
+
+
+        // Manually resolve the 'panic_impl' lang item
+        if Some(instance.def_id()) == this.tcx.lang_items().panic_impl() {
+            println!("Invoking panic impl: {:?}", instance);
+            return Ok(Some(this.load_mir(instance.def)?));
+        }*/
 
         // First, run the common hooks also supported by CTFE.
         if Some(instance.def_id()) != this.tcx.lang_items().panic_fn() && 
@@ -43,11 +53,9 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
 
         // Try to see if we can do something about foreign items.
         if this.tcx.is_foreign_item(instance.def_id()) {
-            // An external function that we cannot find MIR for, but we can still run enough
+            // An external function that we (possibly) cannot find MIR for, but we can still run enough
             // of them to make miri viable.
-            this.emulate_foreign_item(instance.def_id(), args, dest, ret)?;
-            // `goto_block` already handled.
-            return Ok(None);
+            return Ok(this.emulate_foreign_item(instance, args, dest, ret)?);
         }
 
         // Otherwise, load the MIR.
@@ -58,11 +66,12 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
     /// This function will handle `goto_block` if needed.
     fn emulate_foreign_item(
         &mut self,
-        def_id: DefId,
+        instance: ty::Instance<'tcx>,
         args: &[OpTy<'tcx, Borrow>],
         dest: Option<PlaceTy<'tcx, Borrow>>,
         ret: Option<mir::BasicBlock>,
-    ) -> EvalResult<'tcx> {
+    ) -> EvalResult<'tcx, Option<&'mir mir::Mir<'tcx>>> {
+        let def_id = instance.def_id();
         let this = self.eval_context_mut();
         let attrs = this.tcx.get_attrs(def_id);
         let link_name = match attr::first_attr_value_str_by_name(&attrs, "link_name") {
@@ -75,6 +84,12 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
 
         // First: functions that could diverge.
         match link_name {
+            "panic_impl" => {
+                // Manually forward to 'panic_impl' lang item
+                let panic_impl_real = this.tcx.lang_items().panic_impl().unwrap();
+
+                return Ok(Some(this.load_mir(InstanceDef::Item(panic_impl_real))?));
+            },
             "__rust_start_panic" => {
                 // This function has the signature:
                 // 'fn __rust_start_panic(payload: usize) -> u32;'
@@ -305,7 +320,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 this.memory_mut().deallocate(temp_ptr.to_ptr()?, None, MiriMemoryKind::UnwindHelper.into())?;
                 this.dump_place(*dest.expect("dest is None!"));
 
-                return Ok(())
+                return Ok(None)
 
             }
             _ => if dest.is_none() {
@@ -562,7 +577,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 this.write_null(dest)?;
 
                 // Don't fall through, we do *not* want to `goto_block`!
-                return Ok(());
+                return Ok(None);
             }
 
             "memcmp" => {
@@ -1037,7 +1052,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
 
         this.goto_block(Some(ret))?;
         this.dump_place(*dest);
-        Ok(())
+        Ok(None)
     }
 
     fn write_null(&mut self, dest: PlaceTy<'tcx, Borrow>) -> EvalResult<'tcx> {

@@ -11,7 +11,7 @@ fn aaron_do_panic() {
         c.set(val + 1);
         val
     });
-    panic!(format!("Hello from panic: {:?}", old_val));
+    //panic!(format!("Hello from panic: {:?}", old_val));
 }
 
 fn main() {
@@ -19,12 +19,17 @@ fn main() {
     std::panic::set_hook(Box::new(|info| {
         println!("Custom panic hook: location: {:?} payload: {:?}", info.location(), info.payload().downcast_ref::<String>());
     }));
-    let res = catch_unwind(aaron_do_panic);
-    let expected: Box<String> = Box::new("Hello from panic: 0".to_string());
+    /*let res = catch_unwind(aaron_do_panic);
+    let expected: Box<String> = Box::new("Wrong expected message".to_string());
     let actual = res.expect_err("do_panic() did not panic!")
         .downcast::<String>().expect("Failed to cast to string!");
         
-    assert_eq!(expected, actual);
+    assert_eq!(expected, actual);*/
     //println!("Actual: {:?}", actual);
+
+    let my_string = "Should not leak".to_string();
+    panic!("Memory leak!".to_string());
+
+    //panic!("Uncaught panic!".to_string());
 }
 
