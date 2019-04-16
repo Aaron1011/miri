@@ -5,6 +5,7 @@ use rustc_target::spec::PanicStrategy;
 use rustc::hir::def_id::DefId;
 use rustc::mir;
 use syntax::attr;
+use syntax::source_map::{self, DUMMY_SP};
 
 use rand::RngCore;
 
@@ -204,6 +205,18 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // '*mut (dyn Any + Send)', which is a fat 
                 let temp_ptr = this.allocate(dyn_ptr_layout, MiriMemoryKind::UnwindHelper.into());
 
+
+
+                /*force_eval(this, box_me_up_fn, box_me_up_mir.span, box_me_up_mir, Some(temp_ptr.into()),
+                                StackPopCleanup::None { cleanup: true }, |this| {
+
+                    let mut args = this.frame().mir.args_iter();
+                    let arg_0 = this.eval_place(&mir::Place::Base(mir::PlaceBase::Local(args.next().unwrap())))?;
+                    this.write_scalar(data_ptr, arg_0)?;
+                    Ok(())
+                })?;*/
+
+
                 let cur_frame = this.cur_frame();
 
                 this.push_stack_frame(
@@ -217,6 +230,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 let mut args = this.frame().mir.args_iter();
                 let arg_0 = this.eval_place(&mir::Place::Base(mir::PlaceBase::Local(args.next().unwrap())))?;
                 this.write_scalar(data_ptr, arg_0)?;
+
 
                 // Step through execution of 'box_me_up'
                 // We know that we're finished when our stack depth
@@ -301,6 +315,38 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                         break;
                     } else {
                         trace!("unwinding: popping frame: {:?}", this.frame().span);
+                        let block = &this.frame().mir.basic_blocks()[this.frame().block];
+
+                        // All frames in the call stack should be executing their terminators.,
+                        // as that's the only way for a basic block to perform a function call
+                        if let Some(stmt) = block.statements.get(this.frame().stmt) {
+                            panic!("Unexpcted statement '{:?}' for frame {:?}", stmt, this.frame().span);
+                        }
+
+                        let cur_instance = this.frame().instance;
+                        //let fake_ret_place = MPlaceTy::dangling(this.layout_of(this.tcx.mk_unit())?, this).into();
+
+
+                        // We're only interested in terminator types which allow for a cleanuup
+                        // block (e.g. Call), and that also actually provide one
+                        if let Some(Some(unwind)) = block.terminator().unwind() {
+                            println!("Calling unwind block: {:?}", unwind);
+                            this.goto_block(Some(*unwind))?;
+
+                            loop {
+                                this.step()?;
+                            }
+                            // We use DUMM_SP, since 'unwind' blocks don't correspond to any actual
+                            // Rust source
+                            //force_eval(this, cur_instance, DUMMY_SP, unwind, None, StackPopCleanup::None { cleanup: true },
+                            //           || {})?;
+                        }
+
+
+
+
+
+                        println!("current statement: {:?}", block.statements.get(this.frame().stmt));
                         // HACK: set the return place to prevent librustc_mir
                         // from bailing out. This should be replaced with a proper
                         // solution (e.g. giving 'pop_stack_frame' an 'unwinding' argument)
@@ -1097,3 +1143,35 @@ fn gen_random<'a, 'mir, 'tcx>(
         }
     }
 }
+
+/*
+/// Pushes a new stack frame and calls the specified function,
+/// driving its execution to completion via 'step()'
+/// When this function returns, the mir specified by 'mir'
+/// will have returned.
+///
+/// This should only be used in very specialized circumstances (currently only unwinding),
+fn force_eval<'a, 'mir, 'tcx, F: FnOnce(&mut MiriEvalContext<'a, 'mir, 'tcx>) -> EvalResult<'tcx>>(
+    this: &mut MiriEvalContext<'a, 'mir, 'tcx>,
+    instance: ty::Instance<'tcx>,
+    span: source_map::Span,
+    mir: &'mir mir::Mir<'tcx>,
+    return_place: Option<PlaceTy<'tcx, stacked_borrows::Borrow>>,
+    return_to_block: StackPopCleanup,
+    after_push: F
+) -> EvalResult<'tcx> {
+
+    // Keep track of the frame we're at before we start
+    // execuring the new function, so that we know when we're done
+    let cur_frame = this.cur_frame();
+
+    this.push_stack_frame(instance, span, mir, return_place, return_to_block)?;
+
+    after_push(this)?;
+
+    while this.cur_frame() != cur_frame {
+        this.step()?;
+    }
+
+    Ok(())
+}*/
