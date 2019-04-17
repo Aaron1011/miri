@@ -19,18 +19,11 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
         ret: Option<mir::BasicBlock>,
     ) -> EvalResult<'tcx, Option<&'mir mir::Mir<'tcx>>> {
         let this = self.eval_context_mut();
-        /*trace!("eval_fn_call: {:#?}, {:?} {:?}", instance, instance.def_id(), dest.map(|place| *place));
-        println!("panic_impl: {:?}", this.tcx.lang_items().panic_impl());
-        println!("Eval: {:?}", instance);
-
-
-        // Manually resolve the 'panic_impl' lang item
-        if Some(instance.def_id()) == this.tcx.lang_items().panic_impl() {
-            println!("Invoking panic impl: {:?}", instance);
-            return Ok(Some(this.load_mir(instance.def)?));
-        }*/
+        trace!("eval_fn_call: {:#?}, {:?} {:?}", instance, instance.def_id(), dest.map(|place| *place));
 
         // First, run the common hooks also supported by CTFE.
+        // We *don't* forward panic-related items to the common hooks,
+        // as we want to handle those specially
         if Some(instance.def_id()) != this.tcx.lang_items().panic_fn() && 
             Some(instance.def_id()) != this.tcx.lang_items().begin_panic_fn() &&
             this.hook_fn(instance, args, dest)? {
