@@ -3,15 +3,36 @@ use std::cell::Cell;
 
 thread_local! {
     static MY_COUNTER: Cell<usize> = Cell::new(0);
+    static DROPPED: Cell<bool> = Cell::new(false);
 }
 
-fn aaron_do_panic() {
+struct DropTester;
+
+impl Drop for DropTester {
+    fn drop(&mut self) {
+        DROPPED.with(|c| {
+            c.set(true);
+        });
+    }
+}
+
+fn do_panic_counter() {
+    // If this gets leaked, it will be easy to spot
+    // in Miri's leak report
+    let _string = "LEAKED FROM do_panic_counter".to_string();
+
+    // When we panic, this should get dropped during unwinding
+    let _drop_tester = DropTester;
+
+    // Check for bugs in Miri's panic implementation.
+    // If do_panic_counter() somehow gets called more than once,
+    // we'll generate a different panic message
     let old_val = MY_COUNTER.with(|c| {
         let val = c.get();
         c.set(val + 1);
         val
     });
-    //panic!(format!("Hello from panic: {:?}", old_val));
+    panic!(format!("Hello from panic: {:?}", old_val));
 }
 
 fn main() {
@@ -19,17 +40,16 @@ fn main() {
     std::panic::set_hook(Box::new(|info| {
         println!("Custom panic hook: location: {:?} payload: {:?}", info.location(), info.payload().downcast_ref::<String>());
     }));
-    /*let res = catch_unwind(aaron_do_panic);
-    let expected: Box<String> = Box::new("Wrong expected message".to_string());
+
+    let res = catch_unwind(do_panic_counter);
+    let expected: Box<String> = Box::new("Hello from panic: 0".to_string());
     let actual = res.expect_err("do_panic() did not panic!")
         .downcast::<String>().expect("Failed to cast to string!");
         
-    assert_eq!(expected, actual);*/
-    //println!("Actual: {:?}", actual);
-
-    let my_string = "Should not leak".to_string();
-    panic!("Memory leak!".to_string());
-
-    //panic!("Uncaught panic!".to_string());
+    assert_eq!(expected, actual);
+    DROPPED.with(|c| {
+        // This should have been set to 'true' by DropTester
+        assert!(c.get());
+    });
 }
 
