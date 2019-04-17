@@ -36,11 +36,6 @@ fn do_panic_counter() {
 }
 
 fn main() {
-    println!("Main called!");
-    std::panic::set_hook(Box::new(|info| {
-        println!("Custom panic hook: location: {:?} payload: {:?}", info.location(), info.payload().downcast_ref::<String>());
-    }));
-
     let res = catch_unwind(do_panic_counter);
     let expected: Box<String> = Box::new("Hello from panic: 0".to_string());
     let actual = res.expect_err("do_panic() did not panic!")

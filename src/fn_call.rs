@@ -2,10 +2,8 @@ use rustc::ty;
 use rustc::ty::layout::{Align, LayoutOf, Size};
 use rustc::ty::InstanceDef;
 use rustc_target::spec::PanicStrategy;
-use rustc::hir::def_id::DefId;
 use rustc::mir;
 use syntax::attr;
-use syntax::source_map::{self, DUMMY_SP};
 
 use rand::RngCore;
 
@@ -323,36 +321,18 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                             panic!("Unexpcted statement '{:?}' for frame {:?}", stmt, this.frame().span);
                         }
 
-                        let cur_instance = this.frame().instance;
-                        //let fake_ret_place = MPlaceTy::dangling(this.layout_of(this.tcx.mk_unit())?, this).into();
-
-
                         // We're only interested in terminator types which allow for a cleanuup
                         // block (e.g. Call), and that also actually provide one
                         if let Some(Some(unwind)) = block.terminator().unwind() {
-                            println!("Calling unwind block: {:?}", unwind);
                             this.goto_block(Some(*unwind))?;
 
+                            // Run the 'unwind' block until we encounter
+                            // a 'Resume', which indicates that the cleanup
+                            // is done.
                             assert_eq!(this.run()?, StepOutcome::Resume);
-
-                            // We use DUMM_SP, since 'unwind' blocks don't correspond to any actual
-                            // Rust source
-                            //force_eval(this, cur_instance, DUMMY_SP, unwind, None, StackPopCleanup::None { cleanup: true },
-                            //           || {})?;
                         }
 
-
-
-
-
-                        println!("current statement: {:?}", block.statements.get(this.frame().stmt));
-                        // HACK: set the return place to prevent librustc_mir
-                        // from bailing out. This should be replaced with a proper
-                        // solution (e.g. giving 'pop_stack_frame' an 'unwinding' argument)
-                        /*this.frame_mut().return_place = Some(
-                            MPlaceTy::dangling(this.layout_of(this.tcx.mk_unit())?, this).into()
-                        );
-                        this.frame_mut().return_to_block = StackPopCleanup::None { cleanup: true };*/
+                        // Pop this frame, and continue on to the next one
                         this.pop_stack_frame_unwind()?;
                     }
                 }
