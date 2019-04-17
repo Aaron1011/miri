@@ -333,9 +333,8 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                             println!("Calling unwind block: {:?}", unwind);
                             this.goto_block(Some(*unwind))?;
 
-                            loop {
-                                this.step()?;
-                            }
+                            assert_eq!(this.run()?, StepOutcome::Resume);
+
                             // We use DUMM_SP, since 'unwind' blocks don't correspond to any actual
                             // Rust source
                             //force_eval(this, cur_instance, DUMMY_SP, unwind, None, StackPopCleanup::None { cleanup: true },
@@ -350,11 +349,11 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                         // HACK: set the return place to prevent librustc_mir
                         // from bailing out. This should be replaced with a proper
                         // solution (e.g. giving 'pop_stack_frame' an 'unwinding' argument)
-                        this.frame_mut().return_place = Some(
+                        /*this.frame_mut().return_place = Some(
                             MPlaceTy::dangling(this.layout_of(this.tcx.mk_unit())?, this).into()
                         );
-                        this.frame_mut().return_to_block = StackPopCleanup::None { cleanup: true };
-                        this.pop_stack_frame()?;
+                        this.frame_mut().return_to_block = StackPopCleanup::None { cleanup: true };*/
+                        this.pop_stack_frame_unwind()?;
                     }
                 }
 
