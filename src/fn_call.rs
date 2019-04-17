@@ -466,7 +466,6 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 //     data_ptr: *mut usize,
                 //     vtable_ptr: *mut usize,
                 // ) -> u32
-                // We abort on panic, so not much is going on here, but we still have to call the closure.
                 let f = this.read_scalar(args[0])?.to_ptr()?;
                 let data = this.read_scalar(args[1])?.not_undef()?;
                 let data_ptr = this.deref_operand(args[2])?;
@@ -475,8 +474,9 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 this.write_null(dest)?;
                 trace!("__rust_maybe_catch_panic: {:?}", f_instance);
 
-
-
+                // In unwind mode, we tag this frame with some extra data.
+                // This lets '__rust_start_panic' know that it should jump back
+                // to this frame is a panic occurs.
                 if this.tcx.tcx.sess.panic_strategy() == PanicStrategy::Unwind {
                     this.frame_mut().extra.catch_panic = Some(UnwindData {
                         data: data.to_ptr()?,
@@ -500,8 +500,6 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                     // Directly return to caller.
                     StackPopCleanup::Goto(Some(ret)),
                 )?;
-
-
 
                 let mut args = this.frame().mir.args_iter();
 
