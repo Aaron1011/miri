@@ -86,7 +86,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // This function has the signature:
                 // 'fn __rust_start_panic(payload: usize) -> u32;'
                 //
-                // 'payload' is constructed as follows:
+                // The caller constructs 'payload' as follows
                 // 1. We start with a type implementing core::panic::BoxMeUp
                 // 2. We make this type into a trait object, obtaining a '&mut dyn BoxMeUp'
                 // 3. We obtain a raw pointer to the above mutable reference: that is, we make:
@@ -96,12 +96,11 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
 
                 // When a panic occurs, we (carefully!) reverse the above steps
                 // to get back to the actual panic payload
-               
-                // Even though our argument 'usize', Miri will have kept track
+                //
+                // Even though our argument is a 'usize', Miri will have kept track
                 // of the fact that it was created via a cast from a pointer.
-                // Thus, 'deref_operand' will go directly from a 'usize'
-                // to a '&mut dyn BoxMeUp' - the intermediate cast
-                // from 'usize' to '*mut &dyn BoxMeUp' is done implicitly
+                // This allows us to construct an ImmTy with the proper layout,
+                // and dereference it
                 //
                 // Reference:
                 // https://github.com/rust-lang/rust/blob/9ebf47851a357faa4cd97f4b1dc7835f6376e639/src/libpanic_unwind/lib.rs#L101
@@ -112,23 +111,29 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // Note that we intentially call deref_operand before checking
                 // This ensures that we always check the validity of the argument,
                 // even if we don't end up using it
-                //let payload_raw = this.read_scalar(args[0])?;
                
                 trace!("__rustc_start_panic: {:?}", this.frame().span);
 
 
+                // Read our 'usize' payload argument (which was made by casting
+                // a '*mut &mut dyn BoxMeUp'
                 let payload_raw = this.read_scalar(args[0])?.not_undef()?;
-                
-                
+
+                // Construct an ImmTy, using the precomputed layout of '*mut &mut dyn BoxMeUp'
                 let imm_ty = ImmTy::from_scalar(
                     payload_raw,
                     this.machine.cached_data.as_ref().unwrap().box_me_up_layout
                 );
 
+                // Convert our ImmTy to an MPlace, and read it
                 let mplace = this.ref_to_mplace(imm_ty)?;
 
+                // This is an '&mut dyn BoxMeUp'
                 let payload_dyn = this.read_immediate(mplace.into())?;
 
+                // We deliberately do this after we do some validation of the
+                // 'payload'. This should help catch some basic errors in
+                // the caller of this function, even in abort mode
                 if this.tcx.tcx.sess.panic_strategy() == PanicStrategy::Abort  {
                     return err!(MachineError("the evaluated program abort-panicked".to_string()));
                 }
@@ -146,8 +151,6 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // box_me_up is the first method in the vtable.
                 // First, we extract the vtable pointer from our fat pointer,
                 // and check its alignment
-                //println!("Payload raw: {:?}", payload_raw);
-                //println!("Payload dyn: {:?}", payload_dyn);
 
                 let vtable_ptr = payload_dyn.to_meta()?.expect("Expected fat pointer!").to_ptr()?; 
                 let data_ptr = payload_dyn.to_scalar_ptr()?;
@@ -188,26 +191,18 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 let fn_sig_temp = box_me_up_fn.ty(*this.tcx).fn_sig(*this.tcx);
                 let fn_sig = fn_sig_temp.skip_binder();
 
-                // Finally, we can actually call 'box_me_up'
-
+                // This is the layout of '*mut (dyn Any + Send)', which
+                // is the return type of 'box_me_up'
                 let dyn_ptr_layout = this.layout_of(fn_sig.output())?;
 
                 // We allocate space to store the return value of box_me_up:
                 // '*mut (dyn Any + Send)', which is a fat 
+                
                 let temp_ptr = this.allocate(dyn_ptr_layout, MiriMemoryKind::UnwindHelper.into());
 
-
-
-                /*force_eval(this, box_me_up_fn, box_me_up_mir.span, box_me_up_mir, Some(temp_ptr.into()),
-                                StackPopCleanup::None { cleanup: true }, |this| {
-
-                    let mut args = this.frame().mir.args_iter();
-                    let arg_0 = this.eval_place(&mir::Place::Base(mir::PlaceBase::Local(args.next().unwrap())))?;
-                    this.write_scalar(data_ptr, arg_0)?;
-                    Ok(())
-                })?;*/
-
-
+                // Keep track of our current frame
+                // This allows us to step throgh the exection of 'box_me_up',
+                // exiting when we get back to this frame
                 let cur_frame = this.cur_frame();
 
                 this.push_stack_frame(
@@ -222,7 +217,6 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 let arg_0 = this.eval_place(&mir::Place::Base(mir::PlaceBase::Local(args.next().unwrap())))?;
                 this.write_scalar(data_ptr, arg_0)?;
 
-
                 // Step through execution of 'box_me_up'
                 // We know that we're finished when our stack depth
                 // returns to where it was before.
@@ -231,6 +225,16 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // if 'box_me_up' panics. This is fine, since this
                 // function should never panic, as it's part of the core
                 // panic handling infrastructure
+                //
+                // Normally, we would just let Miri drive
+                // the execution of this stack frame.
+                // However, we need to access its return value
+                // in order to properly unwind.
+                //
+                // When we 'return' from '__rustc_start_panic',
+                // we need to be executing the panic catch handler.
+                // Therefore, we take care all all of the unwinding logic
+                // here, instead of letting the Miri main loop do it
                 while this.cur_frame() != cur_frame {
                     this.step()?;
                 }
@@ -240,7 +244,6 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // We want to split this into its consituient parts -
                 // the data and vtable pointers - and store them back
                 // into the panic handler frame
-
                 let real_ret = this.read_immediate(temp_ptr.into())?;
                 let real_ret_data = real_ret.to_scalar_ptr()?;
                 let real_ret_vtable = real_ret.to_meta()?.expect("Expected fat pointer");
@@ -255,85 +258,7 @@ pub trait EvalContextExt<'a, 'mir, 'tcx: 'a + 'mir>: crate::MiriEvalContextExt<'
                 // If we encounter 'catch_panic', we continue execution at that
                 // frame, filling in data from the panic
                 //
-
-                let mut found = false;
-
-                while !this.stack().is_empty() {
-                    if let Some(unwind_data) = this.frame_mut().extra.catch_panic.take() {
-                        trace!("unwinding: found target frame: {:?}", this.frame().span);
-                        // Here we go
-
-                        let data_ptr = unwind_data.data_ptr.clone();
-                        let vtable_ptr = unwind_data.vtable_ptr.clone();
-                        let dest = unwind_data.dest.clone();
-                        let ret = unwind_data.ret.clone();
-                        drop(unwind_data);
-
-                        this.write_scalar(real_ret_data, data_ptr.into())?;
-                        this.write_scalar(real_ret_vtable, vtable_ptr.into())?;
-
-                        this.write_scalar(Scalar::from_int(1, dest.layout.size), dest)?;
-
-
-                        // This is kind of weird.
-                        // __rust_maybe_catch_panic is called via a 'Call' terminator
-                        // for some BasicBlock. When we *don't* panic, we'll end
-                        // up calling the provided closure, and eventually jumping
-                        // to the block pointed to by the 'Call' terminator
-                        //
-                        // When we unwind, everything changse. We've already handling the 'return'
-                        // from '__rust_maybe_catch_panic' by writing into the 'dest' place,
-                        // and provided 'data' and 'vtable' pointers (which were stored in UnwindData)
-                        //
-                        // So, we pop off the frame corresponding to the '__rust_maybe_catch_panic'
-                        // call. This puts us back in the original caller, with the return value,
-                        // 'data', and 'vtable' ptrs filled back in. 
-
-                        // HACK: set the return place to prevent librustc_mir
-                        // from bailing out. This should be replaced with a proper
-                        // solution (e.g. giving 'pop_stack_frame' an 'unwinding' argument)
-                        /*this.frame_mut().return_place = Some(
-                            MPlaceTy::dangling(this.layout_of(this.tcx.mk_unit())?, this).into()
-                        );
-                        this.frame_mut().return_to_block = StackPopCleanup::None { cleanup: true };
-                        this.pop_stack_frame()?;*/
-
-
-                        this.goto_block(Some(ret))?;
-
-                        found = true;
-
-                        break;
-                    } else {
-                        trace!("unwinding: popping frame: {:?}", this.frame().span);
-                        let block = &this.frame().mir.basic_blocks()[this.frame().block];
-
-                        // All frames in the call stack should be executing their terminators.,
-                        // as that's the only way for a basic block to perform a function call
-                        if let Some(stmt) = block.statements.get(this.frame().stmt) {
-                            panic!("Unexpcted statement '{:?}' for frame {:?}", stmt, this.frame().span);
-                        }
-
-                        // We're only interested in terminator types which allow for a cleanuup
-                        // block (e.g. Call), and that also actually provide one
-                        if let Some(Some(unwind)) = block.terminator().unwind() {
-                            this.goto_block(Some(*unwind))?;
-
-                            // Run the 'unwind' block until we encounter
-                            // a 'Resume', which indicates that the cleanup
-                            // is done.
-                            assert_eq!(this.run()?, StepOutcome::Resume);
-                        }
-
-                        // Pop this frame, and continue on to the next one
-                        this.pop_stack_frame_unwind()?;
-                    }
-                }
-
-                if !found {
-                    // The 'start_fn' lang item should always install a panic handler
-                    return err!(Unreachable);
-                }
+                unwind_stack(this, real_ret_data, real_ret_vtable)?; 
 
                 this.memory_mut().deallocate(temp_ptr.to_ptr()?, None, MiriMemoryKind::UnwindHelper.into())?;
                 this.dump_place(*dest.expect("dest is None!"));
@@ -1116,34 +1041,88 @@ fn gen_random<'a, 'mir, 'tcx>(
     }
 }
 
-/*
-/// Pushes a new stack frame and calls the specified function,
-/// driving its execution to completion via 'step()'
-/// When this function returns, the mir specified by 'mir'
-/// will have returned.
+/// A helper method to unwind the stack.
 ///
-/// This should only be used in very specialized circumstances (currently only unwinding),
-fn force_eval<'a, 'mir, 'tcx, F: FnOnce(&mut MiriEvalContext<'a, 'mir, 'tcx>) -> EvalResult<'tcx>>(
+/// We execute the 'unwind' blocks associated with frame
+/// terminators as we go along (these blocks are responsible
+/// for dropping frame locals in the event of a panic)
+///
+/// When we find our target frame, we write the panic payload
+/// directly into its locals, and jump to it.
+/// After that, panic handling is done - from the perspective
+/// of the caller of '__rust_maybe_catch_panic', the function
+/// has 'returned' normally, after which point Miri excecution
+/// can proceeed normally.
+fn unwind_stack<'a, 'mir, 'tcx>(
     this: &mut MiriEvalContext<'a, 'mir, 'tcx>,
-    instance: ty::Instance<'tcx>,
-    span: source_map::Span,
-    mir: &'mir mir::Mir<'tcx>,
-    return_place: Option<PlaceTy<'tcx, stacked_borrows::Borrow>>,
-    return_to_block: StackPopCleanup,
-    after_push: F
+    payload_data_ptr: Scalar<Borrow>,
+    payload_vtable_ptr: Scalar<Borrow>
 ) -> EvalResult<'tcx> {
 
-    // Keep track of the frame we're at before we start
-    // execuring the new function, so that we know when we're done
-    let cur_frame = this.cur_frame();
+    let mut found = false;
 
-    this.push_stack_frame(instance, span, mir, return_place, return_to_block)?;
+    while !this.stack().is_empty() {
+        // When '__rust_maybe_catch_panic' is called, it marks is frame
+        // with 'catch_panic'. When we find this marker, we've found
+        // our target frame to jump to.
+        if let Some(unwind_data) = this.frame_mut().extra.catch_panic.take() {
+            trace!("unwinding: found target frame: {:?}", this.frame().span);
 
-    after_push(this)?;
+            let data_ptr = unwind_data.data_ptr.clone();
+            let vtable_ptr = unwind_data.vtable_ptr.clone();
+            let dest = unwind_data.dest.clone();
+            let ret = unwind_data.ret.clone();
+            drop(unwind_data);
 
-    while this.cur_frame() != cur_frame {
-        this.step()?;
+
+            // Here, we write directly into the frame of the function
+            // that called '__rust_maybe_catch_panic'.
+            // (NOT the function that called '__rust_start_panic')
+
+            this.write_scalar(payload_data_ptr, data_ptr.into())?;
+            this.write_scalar(payload_vtable_ptr, vtable_ptr.into())?;
+
+            // We 'return' the value 1 from __rust_maybe_catch_panic,
+            // since there was a panic
+            this.write_scalar(Scalar::from_int(1, dest.layout.size), dest)?;
+
+            // We're done - continue execution in the frame of the function
+            // that called '__rust_maybe_catch_panic,'
+            this.goto_block(Some(ret))?;
+            found = true;
+
+            break;
+        } else {
+            // This frame is above our target frame on the call stack.
+            // We pop it off the stack, running its 'unwind' block if applicable
+            trace!("unwinding: popping frame: {:?}", this.frame().span);
+            let block = &this.frame().mir.basic_blocks()[this.frame().block];
+
+            // All frames in the call stack should be executing their terminators.,
+            // as that's the only way for a basic block to perform a function call
+            if let Some(stmt) = block.statements.get(this.frame().stmt) {
+                panic!("Unexpcted statement '{:?}' for frame {:?}", stmt, this.frame().span);
+            }
+
+            // We're only interested in terminator types which allow for a cleanuup
+            // block (e.g. Call), and that also actually provide one
+            if let Some(Some(unwind)) = block.terminator().unwind() {
+                this.goto_block(Some(*unwind))?;
+
+                // Run the 'unwind' block until we encounter
+                // a 'Resume', which indicates that the block
+                // is done.
+                assert_eq!(this.run()?, StepOutcome::Resume);
+            }
+
+            // Pop this frame, and continue on to the next one
+            this.pop_stack_frame_unwind()?;
+        }
     }
 
-    Ok(())
-}*/
+    if !found {
+        // The 'start_fn' lang item should always install a panic handler
+        return err!(Unreachable);
+    }
+    return Ok(())
+}
